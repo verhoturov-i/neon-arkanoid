@@ -29,7 +29,22 @@
     font-size: 18px;
     text-shadow: 0 0 8px #0ff;
     letter-spacing: 2px;
+    align-items: center;
   }
+  #soundBtn {
+    background: transparent;
+    border: 1px solid #0ff;
+    color: #0ff;
+    font-size: 20px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-shadow: 0 0 8px #0ff;
+    box-shadow: 0 0 8px #0ff;
+    transition: all 0.2s;
+  }
+  #soundBtn:hover { background: rgba(0,255,255,0.15); }
+  #soundBtn.muted { color: #f44; border-color: #f44; box-shadow: 0 0 8px #f44; text-shadow: 0 0 8px #f44; }
   canvas {
     background: #000;
     border: 2px solid #0ff;
@@ -98,6 +113,7 @@
     <div>SCORE: <span id="score">0</span></div>
     <div>LEVEL: <span id="level">1</span>/30</div>
     <div>LIVES: <span id="lives">3</span></div>
+    <button id="soundBtn" title="Звук">🔊</button>
   </div>
   <canvas id="game" width="900" height="640"></canvas>
 </div>
@@ -126,6 +142,130 @@ const levelEl = document.getElementById('level');
 const livesEl = document.getElementById('lives');
 const overlay = document.getElementById('overlay');
 const startBtn = document.getElementById('startBtn');
+const soundBtn = document.getElementById('soundBtn');
+
+// ========== ЗВУКОВАЯ СИСТЕМА ==========
+class SoundManager {
+  constructor() {
+    this.ctx = null;
+    this.masterGain = null;
+    this.muted = localStorage.getItem('arkanoid_muted') === 'true';
+    this.initialized = false;
+  }
+  init() {
+    if (this.initialized) return;
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = this.muted ? 0 : 0.3;
+      this.masterGain.connect(this.ctx.destination);
+      this.initialized = true;
+    } catch(e) { console.warn('Audio not supported', e); }
+  }
+  setMuted(m) {
+    this.muted = m;
+    localStorage.setItem('arkanoid_muted', m);
+    if (this.masterGain) this.masterGain.gain.value = m ? 0 : 0.3;
+  }
+  toggle() { this.setMuted(!this.muted); }
+  // Универсальный тон
+  tone(freq, type, duration, volume = 1, freqEnd = null, delay = 0) {
+    if (!this.initialized || this.muted) return;
+    const t = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (freqEnd !== null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t + duration);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(volume, t + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + duration + 0.05);
+  }
+  // Шум (для взрывов)
+  noise(duration, volume = 1, delay = 0, filterFreq = 1000) {
+    if (!this.initialized || this.muted) return;
+    const t = this.ctx.currentTime + delay;
+    const bufferSize = this.ctx.sampleRate * duration;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = filterFreq;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(volume, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(t);
+    src.stop(t + duration + 0.05);
+  }
+  // === Конкретные звуки ===
+  hitPaddle() { this.tone(320, 'sine', 0.08, 0.5); }
+  hitWall() { this.tone(220, 'triangle', 0.05, 0.3); }
+  hitBlock() { this.tone(500, 'square', 0.05, 0.35); }
+  breakBlock() {
+    this.tone(600, 'square', 0.12, 0.4, 150);
+    this.noise(0.15, 0.2, 0, 2000);
+  }
+  powerUp() {
+    this.tone(400, 'sine', 0.08, 0.4, 600);
+    this.tone(600, 'sine', 0.1, 0.4, 900, 0.08);
+    this.tone(900, 'sine', 0.15, 0.4, 1200, 0.16);
+  }
+  laser() { this.tone(1400, 'sawtooth', 0.08, 0.25, 200); }
+  loseBall() {
+    this.tone(400, 'sine', 0.15, 0.5, 200);
+    this.tone(200, 'sine', 0.3, 0.5, 80, 0.15);
+  }
+  levelUp() {
+    // C-E-G-C арпеджио
+    this.tone(523, 'square', 0.12, 0.35);
+    this.tone(659, 'square', 0.12, 0.35, 0, 0.1);
+    this.tone(784, 'square', 0.12, 0.35, 0, 0.2);
+    this.tone(1046, 'square', 0.25, 0.4, 0, 0.3);
+  }
+  gameOver() {
+    // Нисходящий минорный аккорд
+    this.tone(440, 'sawtooth', 0.3, 0.4, 220);
+    this.tone(330, 'sawtooth', 0.3, 0.4, 165, 0.25);
+    this.tone(220, 'sawtooth', 0.6, 0.4, 110, 0.5);
+  }
+  win() {
+    // Мажорное фанфары
+    const notes = [523, 659, 784, 1046, 784, 1046, 1318];
+    notes.forEach((f, i) => this.tone(f, 'square', 0.15, 0.35, 0, i * 0.12));
+    this.noise(0.3, 0.1, notes.length * 0.12, 3000);
+  }
+  click() { this.tone(800, 'square', 0.03, 0.2); }
+}
+const sound = new SoundManager();
+
+// Инициализация звука при первом взаимодействии
+function initSoundOnInteraction() {
+  sound.init();
+}
+addEventListener('keydown', initSoundOnInteraction, { once: true });
+addEventListener('click', initSoundOnInteraction, { once: true });
+
+// Кнопка звука
+function updateSoundBtn() {
+  soundBtn.textContent = sound.muted ? '🔇' : '🔊';
+  soundBtn.classList.toggle('muted', sound.muted);
+}
+updateSoundBtn();
+soundBtn.addEventListener('click', () => {
+  sound.toggle();
+  updateSoundBtn();
+  sound.click();
+});
 
 // ---------- ВВОД ----------
 const keys = {};
@@ -136,7 +276,6 @@ addEventListener('keydown', e => {
     if (state === 'ready') {
       launchBall();
     } else if (state === 'playing') {
-      // Проверяем, есть ли прилипшие мячи
       const stuckBall = balls.find(b => b.stuck);
       if (stuckBall) {
         launchBall();
@@ -147,6 +286,7 @@ addEventListener('keydown', e => {
   }
   if (e.code === 'KeyP' && (state === 'playing' || state === 'paused')) {
     state = state === 'playing' ? 'paused' : 'playing';
+    sound.click();
   }
 });
 addEventListener('keyup', e => keys[e.code] = false);
@@ -192,6 +332,7 @@ class Paddle {
     this.lastShot = now;
     bullets.push(new Bullet(this.x + 10, this.y));
     bullets.push(new Bullet(this.x + this.w - 12, this.y));
+    sound.laser();
   }
   draw() {
     ctx.save();
@@ -234,6 +375,7 @@ class Ball {
     this.vx = Math.cos(ang) * this.baseSpeed;
     this.vy = Math.sin(ang) * this.baseSpeed;
     this.stuck = false;
+    sound.hitPaddle();
   }
   update() {
     if (this.stuck) {
@@ -246,9 +388,9 @@ class Ball {
     if (this.trail.length > 12) this.trail.shift();
     this.x += this.vx * speedMul;
     this.y += this.vy * speedMul;
-    if (this.x < this.r) { this.x = this.r; this.vx *= -1; }
-    if (this.x > W - this.r) { this.x = W - this.r; this.vx *= -1; }
-    if (this.y < this.r) { this.y = this.r; this.vy *= -1; }
+    if (this.x < this.r) { this.x = this.r; this.vx *= -1; sound.hitWall(); }
+    else if (this.x > W - this.r) { this.x = W - this.r; this.vx *= -1; sound.hitWall(); }
+    if (this.y < this.r) { this.y = this.r; this.vy *= -1; sound.hitWall(); }
     if (this.vy > 0 && this.y + this.r >= paddle.y && this.y - this.r <= paddle.y + paddle.h
         && this.x >= paddle.x && this.x <= paddle.x + paddle.w) {
       this.y = paddle.y - this.r;
@@ -257,6 +399,7 @@ class Ball {
       const sp = Math.hypot(this.vx, this.vy);
       this.vx = Math.sin(ang) * sp;
       this.vy = -Math.abs(Math.cos(ang) * sp);
+      sound.hitPaddle();
       if (stickyTime > 0) {
         this.stuck = true;
         this.vx = 0; this.vy = 0;
@@ -333,6 +476,9 @@ class Block {
       else if (Math.random() < 0.18) drop = true;
       if (drop) spawnPowerUp(this.x + this.w/2, this.y + this.h/2);
       spawnParticles(this.x + this.w/2, this.y + this.h/2, this.color, 20);
+      sound.breakBlock();
+    } else {
+      sound.hitBlock();
     }
   }
   draw() {
@@ -392,6 +538,7 @@ class PowerUp {
         && this.x + this.w >= paddle.x && this.x <= paddle.x + paddle.w) {
       applyPower(this.type);
       spawnParticles(this.x + this.w/2, this.y + this.h/2, '#ff0', 25);
+      sound.powerUp();
       return false;
     }
     return true;
@@ -641,16 +788,22 @@ function update() {
   bullets = bullets.filter(b => b.alive);
 
   for (const b of balls) b.update();
+  const prevLen = balls.length;
   balls = balls.filter(b => b.y - b.r <= H);
-  if (balls.length === 0) {
-    lives--;
-    if (lives <= 0) {
-      state = 'gameover';
-      showOverlay('GAME OVER', `Счёт: ${score}`, 'ЗАНОВО');
-    } else {
-      const ball = new Ball(W/2, paddle.y - 10, true);
-      balls.push(ball);
-      state = 'ready';
+  if (balls.length < prevLen) {
+    // мяч упал
+    if (balls.length === 0) {
+      lives--;
+      sound.loseBall();
+      if (lives <= 0) {
+        state = 'gameover';
+        sound.gameOver();
+        showOverlay('GAME OVER', `Счёт: ${score}`, 'ЗАНОВО');
+      } else {
+        const ball = new Ball(W/2, paddle.y - 10, true);
+        balls.push(ball);
+        state = 'ready';
+      }
     }
   }
 
@@ -671,9 +824,11 @@ function update() {
   if (remaining === 0 && state === 'playing') {
     if (level >= 30) {
       state = 'win';
+      sound.win();
       showOverlay('ПОБЕДА!', `Финальный счёт: ${score}`, 'ИГРАТЬ СНОВА');
     } else {
       level++;
+      sound.levelUp();
       loadLevel(level);
     }
   }
@@ -796,6 +951,8 @@ function loop() {
 }
 
 startBtn.onclick = () => {
+  sound.init();
+  sound.click();
   overlay.classList.add('hidden');
   startGame();
 };
